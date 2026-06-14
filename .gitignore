@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Данные приложения
+parsed_messages.json
+dangerous_openrouter.csv
+dangerous_only.csv
+*.log
+
+# Папка с HTML-отчётами (может быть большой)
+html_reports/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.env
+parsed_messages.json
+dangerous_openrouter.csv
+dangerous_only.csv
+html_reports/

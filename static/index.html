@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Telegram Analyzer // SYS.CTL</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@100..800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
+  </head>
+  <body
+    class="bg-black text-gray-300 antialiased selection:bg-accent-orange selection:text-black"
+  >
+    <div class="noise-overlay"></div>
+
+    <div class="flex h-screen relative z-10 p-2 gap-2">
+      <div
+        class="w-96 flex flex-col bg-panel border border-grid-color flex-shrink-0 relative overflow-hidden"
+      >
+        <div
+          class="absolute top-0 left-0 w-full h-[2px] bg-accent-orange"
+        ></div>
+
+        <div class="p-5 flex-1 overflow-y-auto custom-scrollbar">
+          <div class="flex justify-between items-center mb-4">
+            <h1
+              class="text-sm tracking-[0.2em] font-bold text-accent-orange uppercase flex items-center"
+            >
+              <span class="mr-2 opacity-50">■</span>
+              <span data-i18n="sys_config">[ SYS.CONFIG ]</span>
+            </h1>
+            <select
+              id="langSwitcher"
+              class="bg-black border border-gray-700 text-[10px] uppercase tracking-wider py-1 px-2 rounded-none focus:outline-none hover:border-gray-500"
+            >
+              <option value="ru">RU</option>
+              <option value="en">EN</option>
+            </select>
+          </div>
+
+          <div class="mb-6 group">
+            <label
+              class="block text-[10px] uppercase tracking-widest text-gray-500 mb-2"
+              data-i18n="api_key_label"
+              >API Key (OpenRouter)</label
+            >
+            <div class="relative">
+              <span class="absolute left-0 top-2 text-gray-600 select-none"
+                >></span
+              >
+              <input
+                type="password"
+                id="apiKey"
+                class="w-full bg-transparent border-b border-gray-700 pl-4 py-2 text-sm text-gray-200 focus:border-accent-orange focus:outline-none transition-colors rounded-none placeholder-gray-700"
+                placeholder="sk-or-v1-..."
+                data-i18n-placeholder="api_key_placeholder"
+              />
+            </div>
+
+            <div class="flex gap-2 mt-3">
+              <button
+                id="useEnvKeyBtn"
+                class="flex-1 border border-gray-700 hover:border-safe-green hover:text-safe-green py-2 text-xs uppercase tracking-wide transition-colors"
+              >
+                <span data-i18n="use_env_key_btn">[ USE_ENV_KEY ]</span>
+              </button>
+              <button
+                id="loadModelsBtn"
+                class="flex-1 border border-gray-700 hover:border-gray-300 hover:text-white py-2 text-xs uppercase tracking-wide transition-colors"
+              >
+                <span data-i18n="fetch_models_btn">[ FETCH_MODELS ]</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="mb-6">
+            <label
+              class="block text-[10px] uppercase tracking-widest text-gray-500 mb-2"
+              data-i18n="llm_model_label"
+              >LLM Model</label
+            >
+            <div
+              class="relative border border-gray-700 hover:border-gray-500 transition-colors"
+            >
+              <select
+                id="model"
+                class="w-full bg-transparent appearance-none pl-3 pr-8 py-2 text-xs text-gray-300 focus:outline-none cursor-pointer rounded-none"
+              >
+                <option
+                  class="bg-black text-gray-300"
+                  value=""
+                  data-i18n="model_placeholder"
+                >
+                  -- awaiting uplink --
+                </option>
+              </select>
+              <div
+                class="absolute right-3 top-2.5 pointer-events-none text-gray-500 text-xs"
+              >
+                ▼
+              </div>
+            </div>
+          </div>
+
+          <div class="mb-6">
+            <label
+              class="block text-[10px] uppercase tracking-widest text-gray-500 mb-2"
+              data-i18n="max_workers_label"
+              >Max Workers / Threads</label
+            >
+            <div class="relative">
+              <span class="absolute left-0 top-2 text-gray-600 select-none"
+                >#</span
+              >
+              <input
+                type="number"
+                id="maxWorkers"
+                class="w-full bg-transparent border-b border-gray-700 pl-4 py-2 text-sm text-gray-200 focus:border-accent-orange focus:outline-none transition-colors rounded-none"
+                value="5"
+                min="1"
+              />
+            </div>
+          </div>
+
+          <div class="mb-8">
+            <label class="flex items-start cursor-pointer group">
+              <div
+                class="relative w-4 h-4 mr-3 mt-0.5 border border-gray-600 group-hover:border-accent-orange flex-shrink-0 transition-colors"
+              >
+                <input
+                  type="checkbox"
+                  id="forceParse"
+                  class="peer absolute opacity-0 cursor-pointer w-full h-full"
+                />
+                <div
+                  class="absolute inset-0 bg-accent-orange scale-0 peer-checked:scale-100 transition-transform duration-200"
+                ></div>
+              </div>
+              <span
+                class="text-xs text-gray-400 leading-tight group-hover:text-gray-200 transition-colors"
+              >
+                <span data-i18n="force_parse_main">FORCE RE-PARSE</span><br />
+                <span
+                  class="text-[10px] text-gray-600"
+                  data-i18n="force_parse_sub"
+                  >Bypass cache & rebuild (--force)</span
+                >
+              </span>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-1 gap-2">
+            <button
+              id="runBtn"
+              class="run-btn w-full relative overflow-hidden bg-accent-orange text-black font-bold uppercase tracking-[0.2em] py-3 text-xs transition-all"
+            >
+              <span class="relative z-10 flex items-center justify-center">
+                <span class="mr-2">/></span>
+                <span data-i18n="run_btn_text">INIT_ANALYSIS</span>
+              </span>
+            </button>
+            <button
+              id="stopBtn"
+              class="stop-btn w-full relative overflow-hidden bg-black text-white font-bold uppercase tracking-[0.2em] py-3 text-xs transition-all"
+            >
+              <span class="relative z-10 flex items-center justify-center">
+                <span class="mr-2">/></span>
+                <span data-i18n="stop_btn_text">STOP</span>
+              </span>
+            </button>
+          </div>
+
+          <div class="my-8 border-t border-grid-color border-dashed"></div>
+
+          <div class="mb-8">
+            <h2
+              class="text-[10px] uppercase tracking-widest text-gray-500 mb-3 flex items-center"
+            >
+              <span class="w-2 h-2 bg-gray-700 mr-2 inline-block"></span>
+              <span data-i18n="dir_html_reports">[ DIR: html_reports ]</span>
+            </h2>
+            <div
+              id="fileList"
+              class="text-[11px] space-y-1 max-h-40 overflow-y-auto custom-scrollbar text-gray-400 pl-4 border-l border-gray-800"
+            ></div>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-end mb-3">
+              <h2
+                class="text-[10px] uppercase tracking-widest text-gray-500 flex items-center"
+              >
+                <span class="w-2 h-2 bg-gray-700 mr-2 inline-block"></span>
+                <span data-i18n="cache_data">[ CACHE_DATA ]</span>
+              </h2>
+              <button
+                id="toggleJsonBtn"
+                class="text-[10px] text-accent-orange hover:text-white transition-colors uppercase"
+              >
+                <span data-i18n="toggle_view_btn">Toggle View</span>
+              </button>
+            </div>
+            <div id="jsonViewer" class="json-viewer hidden"></div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        class="flex-1 flex flex-col bg-panel border border-grid-color relative overflow-hidden"
+      >
+        <div
+          class="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-gray-500 m-2 pointer-events-none"
+        ></div>
+        <div
+          class="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-gray-500 m-2 pointer-events-none"
+        ></div>
+
+        <div
+          class="flex justify-between items-center p-4 border-b border-grid-color bg-black/40"
+        >
+          <h2
+            class="text-xs uppercase tracking-widest text-gray-400 flex items-center"
+          >
+            <span
+              class="inline-block w-2 h-2 rounded-full bg-accent-orange animate-pulse mr-3"
+              id="statusIndicator"
+            ></span>
+            <span data-i18n="stdout_log_title"
+              >[ STDOUT // EXECUTION_LOG ]</span
+            >
+          </h2>
+          <button
+            id="clearLogBtn"
+            class="text-[10px] uppercase tracking-wider text-gray-500 hover:text-white transition-colors border border-transparent hover:border-gray-700 px-2 py-1"
+          >
+            <span data-i18n="flush_buffer_btn">Flush Buffer</span>
+          </button>
+        </div>
+
+        <div
+          id="logContainer"
+          class="log-container flex-1 p-4 custom-scrollbar"
+        ></div>
+
+        <div
+          class="p-2 border-t border-grid-color bg-black/80 flex justify-between items-center text-[10px] uppercase tracking-widest text-gray-600"
+        >
+          <div class="flex items-center">
+            <span class="opacity-50 mr-2"
+              ><span data-i18n="status_label">STATUS:</span></span
+            >
+            <span id="logStatus" class="text-gray-400" data-i18n="status_idle"
+              >IDLE_READY</span
+            >
+          </div>
+          <div>
+            <span data-i18n="systime_label">SYSTIME_</span>
+            <span id="sysTime"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+  </body>
+</html>
