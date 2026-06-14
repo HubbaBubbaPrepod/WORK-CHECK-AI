@@ -22,8 +22,8 @@
 
 1. Склонируйте репозиторий:
    ```bash
-   git clone https://github.com/yourusername/telegram-analyzer.git
-   cd telegram-analyzer
+   git clone https://github.com/HubbaBubbaPrepod/WORK-CHECK-AI.git
+   cd WORK_CHECK_AI
    ```
 
 2. Установите зависимости:
@@ -90,7 +90,7 @@ python check.py \
 ## Структура проекта
 
 ```
-telegram-analyzer/
+WORK-CHECK-AI/
 ├── backend.py          # FastAPI сервер + WebSocket
 ├── check.py            # Основной скрипт анализа
 ├── requirements.txt    # Зависимости
