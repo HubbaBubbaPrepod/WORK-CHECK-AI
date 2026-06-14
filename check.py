@@ -27,6 +27,8 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=5, help="Количество параллельных потоков")
     parser.add_argument("--max-retries", type=int, default=10, help="Количество повторных попыток при ошибке")
     parser.add_argument("--force", action="store_true", help="Принудительно перепарсить HTML (игнорировать кеш)")
+    parser.add_argument("--resume", action="store_true", default=True, help="Возобновить с последнего обработанного сообщения")
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help="Не возобновлять, начать заново")
     return parser.parse_args()
 
 args = parse_args()
@@ -38,13 +40,14 @@ MAX_WORKERS = args.max_workers
 MAX_RETRIES = args.max_retries
 FORCE_PARSE = args.force
 MODEL = args.model
+RESUME = args.resume
 
 api_keys_list = [k.strip() for k in args.api_keys.split(",") if k.strip()]
 if not api_keys_list:
     print("ОШИБКА: Не указано ни одного API ключа", file=sys.stderr)
     sys.exit(1)
 
-print(f"[INIT] Загружено ключей: {len(api_keys_list)}, модель: {MODEL}")
+print(f"[INIT] Загружено ключей: {len(api_keys_list)}, модель: {MODEL}, resume={RESUME}")
 
 # Пул ключей с состоянием блокировки
 key_pool = deque()
@@ -64,9 +67,9 @@ def get_next_api_key():
     min_ban = min((item["ban_until"] for item in key_pool if item["ban_until"]), default=None)
     if min_ban:
         wait = (min_ban - now).total_seconds()
-        if wait > 600:  # если ждать больше 10 минут – выходим
-            print(f"[FATAL] Все ключи заблокированы надолго (мин. ожидание {wait:.0f} сек). Завершение.", flush=True)
-            sys.exit(1)
+        if wait > 600:  # если ждать больше 10 минут – выходим, но сохраняем прогресс
+            print(f"[FATAL] Все ключи заблокированы надолго (мин. ожидание {wait:.0f} сек). Сохраняем прогресс и выходим.", flush=True)
+            sys.exit(2)  # exit code 2 означает "пауза, продолжать позже"
         if wait > 0:
             print(f"[RATE-LIMIT] Все ключи заблокированы, ждём {wait:.1f} сек...", flush=True)
             time.sleep(wait)
@@ -136,9 +139,7 @@ def analyze_message(text, msg_id):
             error_str = str(e).lower()
             is_rate_limit = "429" in error_str or "rate limit" in error_str
             if is_rate_limit:
-                # Пытаемся извлечь время восстановления
-                ban_seconds = 3600  # по умолчанию час, т.к. 429 обычно дневной лимит
-                # Сначала ищем Retry-After в заголовках (если есть)
+                ban_seconds = 3600
                 if hasattr(e, 'response') and hasattr(e.response, 'headers'):
                     retry_after = e.response.headers.get('Retry-After')
                     if retry_after:
@@ -146,19 +147,16 @@ def analyze_message(text, msg_id):
                             ban_seconds = int(retry_after)
                         except:
                             pass
-                # Если не нашли, пробуем извлечь число из сообщения
                 if ban_seconds == 3600:
                     match = re.search(r'retry after (\d+)', error_str)
                     if match:
                         ban_seconds = int(match.group(1))
-                # Если число маленькое (менее 10 сек), возможно, это кратковременная блокировка
                 if ban_seconds < 10:
                     ban_seconds = 60
                 mark_key_failed(api_key, ban_duration=ban_seconds)
                 print(f"[RATE-LIMIT] Ключ {api_key[:10]}... получил 429, заблокирован на {ban_seconds} сек. Попытка {attempt+1}/{MAX_RETRIES}", flush=True)
                 continue
             else:
-                # Другие ошибки (500, таймаут) – блокируем ключ ненадолго
                 mark_key_failed(api_key, ban_duration=30)
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 ** attempt)
@@ -223,6 +221,23 @@ def load_or_parse_messages():
             json.dump(messages, f, ensure_ascii=False, indent=2)
         return messages
 
+# Файл прогресса
+PROGRESS_FILE = "progress.json"
+
+def load_progress():
+    if RESUME and os.path.exists(PROGRESS_FILE):
+        try:
+            with open(PROGRESS_FILE, "r") as f:
+                prog = json.load(f)
+                return prog.get("last_index", 0), prog.get("processed_ids", set())
+        except:
+            return 0, set()
+    return 0, set()
+
+def save_progress(last_index, processed_ids):
+    with open(PROGRESS_FILE, "w") as f:
+        json.dump({"last_index": last_index, "processed_ids": list(processed_ids)}, f)
+
 # Глобальная блокировка для записи в CSV
 csv_lock = threading.Lock()
 csv_writer = None
@@ -230,10 +245,13 @@ csv_file = None
 
 def init_csv():
     global csv_writer, csv_file
-    csv_file = open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig")
+    # Определяем режим: если RESUME и файл существует, то дозаписываем, иначе перезаписываем
+    mode = 'a' if RESUME and os.path.exists(OUTPUT_CSV) else 'w'
+    csv_file = open(OUTPUT_CSV, mode, newline="", encoding="utf-8-sig")
     fieldnames = ["file", "date", "msg_id", "group_id", "dangerous", "reason", "text"]
     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-    csv_writer.writeheader()
+    if mode == 'w':
+        csv_writer.writeheader()
     csv_file.flush()
 
 def close_csv():
@@ -246,17 +264,22 @@ def write_result(result):
         csv_writer.writerow(result)
         csv_file.flush()
 
-def process_single_message(msg, idx, total):
-    dangerous, reason = analyze_message(msg["text"], msg["msg_id"])
+def process_single_message(msg, idx, total, processed_ids):
+    # Пропускаем уже обработанные (по msg_id)
+    msg_id = msg["msg_id"]
+    if msg_id in processed_ids:
+        return None
+    dangerous, reason = analyze_message(msg["text"], msg_id)
     symbol = "⚠️ ОПАСНО" if dangerous else "✅ Безопасно"
     reason = reason.strip().replace("\n", " ").replace("\r", " ")
     print(f"[{idx}/{total}] {symbol} | {reason}", flush=True)
 
-    row = {**msg, "dangerous": dangerous, "reason": reason}
-    # Сохраняем в CSV только опасные сообщения
     if dangerous:
+        row = {**msg, "dangerous": dangerous, "reason": reason}
         write_result(row)
-    return row
+    # Добавляем в обработанные (даже безопасные, чтобы не перепроверять)
+    processed_ids.add(msg_id)
+    return (idx, dangerous)
 
 def main():
     global csv_writer, csv_file
@@ -265,6 +288,11 @@ def main():
     all_messages = load_or_parse_messages()
     total = len(all_messages)
     print(f"\n[STATS] Всего сообщений: {total}\n")
+
+    # Загружаем прогресс
+    start_index, processed_ids = load_progress()
+    if start_index > 0:
+        print(f"[RESUME] Продолжаем с индекса {start_index+1} (уже обработано {len(processed_ids)} сообщений)")
 
     interrupted = False
 
@@ -276,12 +304,21 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Планируем задачи только для необработанных сообщений
+    pending = [(idx, msg) for idx, msg in enumerate(all_messages, 1) if idx > start_index and msg["msg_id"] not in processed_ids]
+    if not pending:
+        print("[INFO] Все сообщения уже обработаны.")
+        close_csv()
+        return
+
+    print(f"[INFO] Осталось обработать: {len(pending)} сообщений")
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
-        for idx, msg in enumerate(all_messages, 1):
+        for idx, msg in pending:
             if interrupted:
                 break
-            future = executor.submit(process_single_message, msg, idx, total)
+            future = executor.submit(process_single_message, msg, idx, total, processed_ids.copy())  # copy для потокобезопасности
             futures[future] = idx
 
         for future in as_completed(futures):
@@ -289,13 +326,25 @@ def main():
                 executor.shutdown(wait=False)
                 break
             try:
-                future.result()
+                result = future.result()
+                if result:
+                    last_idx, _ = result
+                    # Сохраняем прогресс после каждого успешного сообщения
+                    save_progress(last_idx, processed_ids)
             except Exception as e:
                 print(f"[ERROR] Критическая ошибка при обработке: {e}", flush=True)
 
         if interrupted:
             executor.shutdown(wait=True)
+            # Сохраняем прогресс перед выходом
+            if futures:
+                last_done = max(futures.values())  # не совсем точно, но приблизительно
+                save_progress(last_done, processed_ids)
 
+    # Финальное сохранение прогресса
+    save_progress(total, processed_ids)
+
+    # Подсчёт опасных сообщений
     try:
         with open(OUTPUT_CSV, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
