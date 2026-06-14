@@ -4,6 +4,7 @@ import subprocess
 import os
 import json
 import traceback
+from typing import List, Optional
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -51,6 +52,19 @@ async def has_key():
     return {"has_key": bool(key) and key.strip() != "" and key != "sk-or-v1-..."}
 
 
+@app.get("/api/env_keys")
+async def get_env_keys():
+    """Возвращает список ключей из переменных окружения OPENROUTER_API_KEYS (через запятую) или OPENROUTER_API_KEY."""
+    keys_str = os.getenv("OPENROUTER_API_KEYS", "")
+    if not keys_str:
+        keys_str = os.getenv("OPENROUTER_API_KEY", "")
+    if not keys_str:
+        return {"keys": []}
+    # разделитель – запятая, можно также поддерживать пробелы
+    keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+    return {"keys": keys}
+
+
 def get_api_key(request_key: str = None) -> str:
     key = request_key or os.getenv("OPENROUTER_API_KEY")
     if not key or key.strip() == "" or key == "sk-or-v1-...":
@@ -89,14 +103,14 @@ async def get_models(req: ModelsRequest):
 
 
 class RunRequest(BaseModel):
-    api_key: str
-    model: str
+    api_keys: List[str]   # список ключей
+    model: str            # одна модель
     max_workers: int = 5
-    max_retries: int = 3
+    max_retries: int = 10
     force: bool = False
-    folder: str = None
-    cache_file: str = None
-    output_csv: str = None
+    folder: Optional[str] = None
+    cache_file: Optional[str] = None
+    output_csv: Optional[str] = None
 
 
 @app.websocket("/ws/run")
@@ -107,40 +121,31 @@ async def websocket_run(websocket: WebSocket):
         data = await websocket.receive_json()
         req = RunRequest(**data)
 
-        api_key = get_api_key(req.api_key)
+        if not req.api_keys:
+            await websocket.send_json({"type": "error", "message": "No API keys provided"})
+            return
 
         folder = req.folder or os.getenv("FOLDER", "./html_reports")
         cache_file = req.cache_file or os.getenv("CACHE_FILE", "parsed_messages.json")
-        output_csv = req.output_csv or os.getenv(
-            "OUTPUT_CSV", "dangerous_openrouter.csv"
-        )
+        output_csv = req.output_csv or os.getenv("OUTPUT_CSV", "dangerous_openrouter.csv")
 
         python_exe = sys.executable
         cmd = [
             python_exe,
             "-u",
             "check.py",
-            "--folder",
-            folder,
-            "--cache",
-            cache_file,
-            "--output",
-            output_csv,
-            "--api-key",
-            api_key,
-            "--model",
-            req.model,
-            "--max-workers",
-            str(req.max_workers),
-            "--max-retries",
-            str(req.max_retries),
+            "--folder", folder,
+            "--cache", cache_file,
+            "--output", output_csv,
+            "--api-keys", ",".join(req.api_keys),
+            "--model", req.model,
+            "--max-workers", str(req.max_workers),
+            "--max-retries", str(req.max_retries),
         ]
         if req.force:
             cmd.append("--force")
 
-        await websocket.send_json(
-            {"type": "stdout", "line": f"Команда: {' '.join(cmd)}"}
-        )
+        await websocket.send_json({"type": "stdout", "line": f"Команда: {' '.join(cmd)}"})
         print(f"Запуск команды: {' '.join(cmd)}")
 
         process = subprocess.Popen(
@@ -173,9 +178,7 @@ async def websocket_run(websocket: WebSocket):
                     if not await safe_send({"type": "stdout", "line": line.rstrip()}):
                         break
             except Exception as e:
-                await safe_send(
-                    {"type": "error", "message": f"Ошибка чтения stdout: {str(e)}"}
-                )
+                await safe_send({"type": "error", "message": f"Ошибка чтения stdout: {str(e)}"})
 
         async def read_stderr():
             try:
@@ -186,9 +189,7 @@ async def websocket_run(websocket: WebSocket):
                     if not await safe_send({"type": "stderr", "line": line.rstrip()}):
                         break
             except Exception as e:
-                await safe_send(
-                    {"type": "error", "message": f"Ошибка чтения stderr: {str(e)}"}
-                )
+                await safe_send({"type": "error", "message": f"Ошибка чтения stderr: {str(e)}"})
 
         async def receive_client():
             try:
@@ -197,21 +198,11 @@ async def websocket_run(websocket: WebSocket):
                     if msg.get("type") == "abort":
                         if process and process.poll() is None:
                             process.terminate()
-                            await safe_send(
-                                {
-                                    "type": "stdout",
-                                    "line": "Процесс остановлен пользователем.",
-                                }
-                            )
+                            await safe_send({"type": "stdout", "line": "Процесс остановлен пользователем."})
             except WebSocketDisconnect:
                 pass
             except Exception as e:
-                await safe_send(
-                    {
-                        "type": "error",
-                        "message": f"Ошибка получения управления: {str(e)}",
-                    }
-                )
+                await safe_send({"type": "error", "message": f"Ошибка получения управления: {str(e)}"})
 
         tasks = [
             asyncio.create_task(read_stdout()),
@@ -235,9 +226,7 @@ async def websocket_run(websocket: WebSocket):
     except Exception as e:
         error_details = traceback.format_exc()
         print(error_details)
-        await websocket.send_json(
-            {"type": "error", "message": f"Ошибка сервера: {str(e)}\n{error_details}"}
-        )
+        await websocket.send_json({"type": "error", "message": f"Ошибка сервера: {str(e)}\n{error_details}"})
     finally:
         if process:
             process.stdout.close()

@@ -5,6 +5,10 @@ import csv
 import time
 import re
 import argparse
+import threading
+import signal
+from collections import deque
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,62 +17,70 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-FOLDER = "./html_reports"
-OUTPUT_CSV = "dangerous_openrouter.csv"
-CACHE_FILE = "parsed_messages.json"
-OPENROUTER_API_KEY = None
-MAX_WORKERS = 5
-MAX_RETRIES = 3
-FORCE_PARSE = False
-MODEL = "openrouter/owl-alpha"
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Анализ Telegram-сообщений через OpenRouter"
-    )
-    parser.add_argument(
-        "--folder", default="./html_reports", help="Папка с HTML-файлами"
-    )
-    parser.add_argument(
-        "--cache",
-        default="parsed_messages.json",
-        help="Файл кеша распарсенных сообщений",
-    )
-    parser.add_argument(
-        "--output", default="dangerous_openrouter.csv", help="Выходной CSV-файл"
-    )
-    parser.add_argument("--api-key", required=True, help="API-ключ OpenRouter")
-    parser.add_argument("--model", default="openrouter/owl-alpha", help="Имя модели")
-    parser.add_argument(
-        "--max-workers", type=int, default=5, help="Количество параллельных потоков"
-    )
-    parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=3,
-        help="Количество повторных попыток при ошибке",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Принудительно перепарсить HTML (игнорировать кеш)",
-    )
+    parser = argparse.ArgumentParser(description="Анализ Telegram-сообщений через OpenRouter с несколькими ключами")
+    parser.add_argument("--folder", default="./html_reports", help="Папка с HTML-файлами")
+    parser.add_argument("--cache", default="parsed_messages.json", help="Файл кеша распарсенных сообщений")
+    parser.add_argument("--output", default="dangerous_openrouter.csv", help="Выходной CSV-файл")
+    parser.add_argument("--api-keys", required=True, help="Список API-ключей через запятую")
+    parser.add_argument("--model", required=True, help="Название модели (одна)")
+    parser.add_argument("--max-workers", type=int, default=5, help="Количество параллельных потоков")
+    parser.add_argument("--max-retries", type=int, default=10, help="Количество повторных попыток при ошибке")
+    parser.add_argument("--force", action="store_true", help="Принудительно перепарсить HTML (игнорировать кеш)")
     return parser.parse_args()
-
 
 args = parse_args()
 
 FOLDER = args.folder
 CACHE_FILE = args.cache
 OUTPUT_CSV = args.output
-OPENROUTER_API_KEY = args.api_key
-MODEL = args.model
 MAX_WORKERS = args.max_workers
 MAX_RETRIES = args.max_retries
 FORCE_PARSE = args.force
+MODEL = args.model
 
-client = OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+api_keys_list = [k.strip() for k in args.api_keys.split(",") if k.strip()]
+if not api_keys_list:
+    print("ОШИБКА: Не указано ни одного API ключа", file=sys.stderr)
+    sys.exit(1)
+
+print(f"[INIT] Загружено ключей: {len(api_keys_list)}, модель: {MODEL}")
+
+# Пул ключей с состоянием блокировки
+key_pool = deque()
+for k in api_keys_list:
+    key_pool.append({"key": k, "ban_until": None, "failures": 0})
+
+def get_next_api_key():
+    """Возвращает рабочий ключ (не забаненный) и переключает его в конец очереди."""
+    now = datetime.now()
+    for _ in range(len(key_pool)):
+        item = key_pool[0]
+        if item["ban_until"] is None or item["ban_until"] < now:
+            key_pool.rotate(-1)
+            return item["key"]
+        key_pool.rotate(-1)
+    # все ключи забанены – проверяем, стоит ли ждать
+    min_ban = min((item["ban_until"] for item in key_pool if item["ban_until"]), default=None)
+    if min_ban:
+        wait = (min_ban - now).total_seconds()
+        if wait > 600:  # если ждать больше 10 минут – выходим
+            print(f"[FATAL] Все ключи заблокированы надолго (мин. ожидание {wait:.0f} сек). Завершение.", flush=True)
+            sys.exit(1)
+        if wait > 0:
+            print(f"[RATE-LIMIT] Все ключи заблокированы, ждём {wait:.1f} сек...", flush=True)
+            time.sleep(wait)
+        return get_next_api_key()
+    return key_pool[0]["key"]
+
+def mark_key_failed(key, ban_duration=60):
+    """Помечает ключ как заблокированный на ban_duration секунд."""
+    for item in key_pool:
+        if item["key"] == key:
+            item["ban_until"] = datetime.now() + timedelta(seconds=ban_duration)
+            item["failures"] += 1
+            print(f"[KEY] Ключ {key[:10]}... заблокирован на {ban_duration} сек (всего ошибок: {item['failures']})", flush=True)
+            break
 
 PROMPT_TEMPLATE = """
 Ты — система анализа сообщений из Telegram на предмет оппозиционной, экстремистской или антиправительственной риторики.  
@@ -78,7 +90,6 @@ PROMPT_TEMPLATE = """
 
 Сообщение:  
 """
-
 
 def extract_json(raw):
     if not raw:
@@ -91,21 +102,19 @@ def extract_json(raw):
             pass
     return None
 
-
 def analyze_message(text, msg_id):
     if not text or len(text) < 10:
         return (False, "слишком короткое или пустое")
 
     for attempt in range(MAX_RETRIES):
+        api_key = get_next_api_key()
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
         try:
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "Ты помощник для модерации контента.",
-                    },
-                    {"role": "user", "content": PROMPT_TEMPLATE + text},
+                    {"role": "system", "content": "Ты помощник для модерации контента."},
+                    {"role": "user", "content": PROMPT_TEMPLATE + text}
                 ],
                 temperature=0.1,
                 extra_headers={
@@ -121,17 +130,43 @@ def analyze_message(text, msg_id):
             if result is None:
                 raise ValueError(f"Невалидный JSON: {raw[:150]}")
 
-            return (
-                result.get("dangerous", False),
-                result.get("reason", "нет пояснения"),
-            )
-        except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(1.5**attempt)
-            else:
-                return (False, f"ошибка после {MAX_RETRIES} попыток: {str(e)}")
-    return (False, "неизвестная ошибка")
+            return (result.get("dangerous", False), result.get("reason", "нет пояснения"))
 
+        except Exception as e:
+            error_str = str(e).lower()
+            is_rate_limit = "429" in error_str or "rate limit" in error_str
+            if is_rate_limit:
+                # Пытаемся извлечь время восстановления
+                ban_seconds = 3600  # по умолчанию час, т.к. 429 обычно дневной лимит
+                # Сначала ищем Retry-After в заголовках (если есть)
+                if hasattr(e, 'response') and hasattr(e.response, 'headers'):
+                    retry_after = e.response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            ban_seconds = int(retry_after)
+                        except:
+                            pass
+                # Если не нашли, пробуем извлечь число из сообщения
+                if ban_seconds == 3600:
+                    match = re.search(r'retry after (\d+)', error_str)
+                    if match:
+                        ban_seconds = int(match.group(1))
+                # Если число маленькое (менее 10 сек), возможно, это кратковременная блокировка
+                if ban_seconds < 10:
+                    ban_seconds = 60
+                mark_key_failed(api_key, ban_duration=ban_seconds)
+                print(f"[RATE-LIMIT] Ключ {api_key[:10]}... получил 429, заблокирован на {ban_seconds} сек. Попытка {attempt+1}/{MAX_RETRIES}", flush=True)
+                continue
+            else:
+                # Другие ошибки (500, таймаут) – блокируем ключ ненадолго
+                mark_key_failed(api_key, ban_duration=30)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1.5 ** attempt)
+                    continue
+                else:
+                    return (False, f"ошибка после {MAX_RETRIES} попыток: {str(e)}")
+
+    return (False, "неизвестная ошибка")
 
 def parse_html(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -155,17 +190,14 @@ def parse_html(file_path):
                 group_id = ch_id_span.get_text(strip=True)
         text = tds[7].get_text(strip=True)
         if text:
-            rows.append(
-                {
-                    "file": os.path.basename(file_path),
-                    "date": date,
-                    "msg_id": msg_id,
-                    "group_id": group_id,
-                    "text": text,
-                }
-            )
+            rows.append({
+                "file": os.path.basename(file_path),
+                "date": date,
+                "msg_id": msg_id,
+                "group_id": group_id,
+                "text": text,
+            })
     return rows
-
 
 def parse_all_html():
     all_messages = []
@@ -176,7 +208,6 @@ def parse_all_html():
                 print(f"[FILE] Парсинг {os.path.basename(filepath)}...")
                 all_messages.extend(parse_html(filepath))
     return all_messages
-
 
 def load_or_parse_messages():
     if not FORCE_PARSE and os.path.exists(CACHE_FILE):
@@ -192,58 +223,89 @@ def load_or_parse_messages():
             json.dump(messages, f, ensure_ascii=False, indent=2)
         return messages
 
+# Глобальная блокировка для записи в CSV
+csv_lock = threading.Lock()
+csv_writer = None
+csv_file = None
+
+def init_csv():
+    global csv_writer, csv_file
+    csv_file = open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig")
+    fieldnames = ["file", "date", "msg_id", "group_id", "dangerous", "reason", "text"]
+    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    csv_writer.writeheader()
+    csv_file.flush()
+
+def close_csv():
+    global csv_file
+    if csv_file:
+        csv_file.close()
+
+def write_result(result):
+    with csv_lock:
+        csv_writer.writerow(result)
+        csv_file.flush()
 
 def process_single_message(msg, idx, total):
     dangerous, reason = analyze_message(msg["text"], msg["msg_id"])
     symbol = "⚠️ ОПАСНО" if dangerous else "✅ Безопасно"
     reason = reason.strip().replace("\n", " ").replace("\r", " ")
     print(f"[{idx}/{total}] {symbol} | {reason}", flush=True)
-    return {**msg, "dangerous": dangerous, "reason": reason}
 
+    row = {**msg, "dangerous": dangerous, "reason": reason}
+    # Сохраняем в CSV только опасные сообщения
+    if dangerous:
+        write_result(row)
+    return row
 
 def main():
+    global csv_writer, csv_file
+    init_csv()
+
     all_messages = load_or_parse_messages()
     total = len(all_messages)
     print(f"\n[STATS] Всего сообщений: {total}\n")
 
-    results = [None] * total
+    interrupted = False
+
+    def signal_handler(sig, frame):
+        nonlocal interrupted
+        print("\n[STOP] Получен сигнал остановки, завершаем обработку...", flush=True)
+        interrupted = True
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
         for idx, msg in enumerate(all_messages, 1):
+            if interrupted:
+                break
             future = executor.submit(process_single_message, msg, idx, total)
             futures[future] = idx
 
         for future in as_completed(futures):
+            if interrupted:
+                executor.shutdown(wait=False)
+                break
             try:
-                result = future.result()
-                results[futures[future] - 1] = result
+                future.result()
             except Exception as e:
-                print(f"[ERROR] Критическая ошибка: {e}")
+                print(f"[ERROR] Критическая ошибка при обработке: {e}", flush=True)
 
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
-        fieldnames = [
-            "file",
-            "date",
-            "msg_id",
-            "group_id",
-            "dangerous",
-            "reason",
-            "text",
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
+        if interrupted:
+            executor.shutdown(wait=True)
 
-    dangerous_msgs = [r for r in results if r and r["dangerous"]]
-    print(f"\n[STATS] Найдено опасных сообщений: {len(dangerous_msgs)}")
-    if dangerous_msgs:
-        with open("dangerous_only.csv", "w", newline="", encoding="utf-8-sig") as f2:
-            writer = csv.DictWriter(f2, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(dangerous_msgs)
-        print("[SAVE] Опасные сообщения сохранены в dangerous_only.csv")
+    try:
+        with open(OUTPUT_CSV, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            dangerous_count = sum(1 for row in reader if row.get("dangerous") == "True")
+        print(f"\n[STATS] Найдено опасных сообщений: {dangerous_count}")
+    except Exception as e:
+        print(f"[WARN] Не удалось подсчитать опасные сообщения: {e}")
 
+    close_csv()
+    print("[INFO] CSV-файл закрыт. Программа завершена.")
 
 if __name__ == "__main__":
     main()

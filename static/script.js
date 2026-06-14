@@ -1,8 +1,7 @@
 const translations = {
   ru: {
     sys_config: "[ SYS.CONFIG ]",
-    api_key_label: "API Key (OpenRouter)",
-    api_key_placeholder: "sk-or-v1-...",
+    api_keys_label: "API Keys (один на строку)",
     use_env_key_btn: "[ USE_ENV_KEY ]",
     fetch_models_btn: "[ FETCH_MODELS ]",
     llm_model_label: "LLM Model",
@@ -23,15 +22,15 @@ const translations = {
 
     init_analysis: "СИСТЕМА: Инициализация основных протоколов анализа...",
     buffer_flushed: "Буфер очищен. Готов к вводу.",
-    fatal_no_api_key: "КРИТИЧЕСКАЯ ОШИБКА: Отсутствует авторизация API Key.",
+    fatal_no_api_keys: "КРИТИЧЕСКАЯ ОШИБКА: Не введено ни одного API Key.",
     fatal_no_model: "КРИТИЧЕСКАЯ ОШИБКА: Не выбрана модель вычислений.",
     warn_connection_severed:
       "ПРЕДУПРЕЖДЕНИЕ: Соединение преждевременно разорвано.",
     process_terminated: "ПРОЦЕСС ЗАВЕРШЁН. КОД ВЫХОДА:",
     critical_error: "КРИТИЧЕСКАЯ ОШИБКА:",
     websocket_fault: "ОШИБКА WEBSOCKET:",
-    alert_no_env_key: "Ключ не задан в .env. Добавьте OPENROUTER_API_KEY.",
-    alert_no_api_input: "Введите API Key или используйте ENV ключ.",
+    alert_no_env_key: "Ключи не заданы в .env. Добавьте OPENROUTER_API_KEYS или OPENROUTER_API_KEY.",
+    alert_no_api_input: "Введите хотя бы один API Key или используйте ENV ключ.",
     select_model_first: "Сначала выберите модель LLM.",
     fetching_models: "[ ЗАПРОС МОДЕЛЕЙ... ]",
     error_fetch_models: "[ ОШИБКА: НЕ УДАЛОСЬ ЗАГРУЗИТЬ МОДЕЛИ ]",
@@ -40,13 +39,11 @@ const translations = {
     stop_not_running: "Нет запущенного процесса для остановки.",
     select_llm_default: "-- ВЫБЕРИТЕ LLM --",
     tokens_short: "токенов",
-
     awaiting_uplink: "-- ожидание связи --",
   },
   en: {
     sys_config: "[ SYS.CONFIG ]",
-    api_key_label: "API Key (OpenRouter)",
-    api_key_placeholder: "sk-or-v1-...",
+    api_keys_label: "API Keys (one per line)",
     use_env_key_btn: "[ USE_ENV_KEY ]",
     fetch_models_btn: "[ FETCH_MODELS ]",
     llm_model_label: "LLM Model",
@@ -67,8 +64,8 @@ const translations = {
 
     init_analysis: "SYSTEM: Initializing primary analysis protocols...",
     buffer_flushed: "Buffer flushed. Ready for input.",
-    fatal_no_api_key: "FATAL: Missing API Key authorization.",
-    fatal_no_model: "FATAL: No computation model selected.",
+    fatal_no_api_keys: "FATAL: No API Keys provided.",
+    fatal_no_model: "FATAL: No model selected.",
     warn_connection_severed: "WARN: Connection severed prematurely.",
     stop_requested: "Stop requested...",
     process_aborted: "Process aborted by user.",
@@ -76,14 +73,13 @@ const translations = {
     process_terminated: "PROCESS TERMINATED. EXIT CODE:",
     critical_error: "CRITICAL ERROR:",
     websocket_fault: "WEBSOCKET FAULT:",
-    alert_no_env_key: "Key not set in .env. Add OPENROUTER_API_KEY.",
-    alert_no_api_input: "Input API Key or link ENV data.",
+    alert_no_env_key: "Keys not set in .env. Add OPENROUTER_API_KEYS or OPENROUTER_API_KEY.",
+    alert_no_api_input: "Input at least one API Key or link ENV data.",
     select_model_first: "Please select an LLM model first.",
     fetching_models: "[ FETCHING MODELS... ]",
     error_fetch_models: "[ ERROR: MODEL FETCH FAILED ]",
     select_llm_default: "-- SELECT LLM --",
     tokens_short: "tkns",
-
     awaiting_uplink: "-- awaiting uplink --",
   },
 };
@@ -134,7 +130,6 @@ function setLanguage(lang) {
   currentLang = lang;
   localStorage.setItem("language", lang);
   applyLanguage();
-
   updateModelSelectTexts();
 }
 
@@ -237,40 +232,22 @@ async function loadCache() {
   }
 }
 
-document.getElementById("useEnvKeyBtn").addEventListener("click", async () => {
-  const res = await fetch("/api/has_key");
-  const data = await res.json();
-  if (data.has_key) {
-    const input = document.getElementById("apiKey");
-    input.value = "";
-    input.placeholder = "[ ENV_KEY_LINKED ]";
-    input.style.borderColor = "var(--safe-green)";
-    input.style.color = "var(--safe-green)";
-    localStorage.setItem("useEnvKey", "true");
-    await loadModels();
-  } else {
-    alert(t("alert_no_env_key"));
-  }
-});
-
+// Загрузка моделей по первому ключу из textarea
 async function loadModels() {
-  let apiKey = document.getElementById("apiKey").value.trim();
-  const useEnv = localStorage.getItem("useEnvKey") === "true";
-
-  if (!apiKey && useEnv) {
-    apiKey = "";
-  } else if (!apiKey) {
+  const apiKeysText = document.getElementById("apiKeys").value.trim();
+  const apiKeys = apiKeysText.split(/\r?\n/).filter(k => k.trim() !== "");
+  if (apiKeys.length === 0) {
     alert(t("alert_no_api_input"));
     return;
   }
-
+  const firstKey = apiKeys[0];
   const modelSelect = document.getElementById("model");
   modelSelect.innerHTML = `<option value="">${t("fetching_models")}</option>`;
   try {
     const res = await fetch("/api/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify({ api_key: firstKey }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -305,6 +282,23 @@ document.getElementById("toggleJsonBtn").addEventListener("click", () => {
 document.getElementById("clearLogBtn").addEventListener("click", clearLog);
 document.getElementById("loadModelsBtn").addEventListener("click", loadModels);
 document.getElementById("stopBtn").addEventListener("click", stopRun);
+
+// Кнопка USE_ENV_KEY – загружает ключи из .env
+document.getElementById("useEnvKeyBtn").addEventListener("click", async () => {
+  const res = await fetch("/api/env_keys");
+  const data = await res.json();
+  if (data.keys && data.keys.length > 0) {
+    const textarea = document.getElementById("apiKeys");
+    textarea.value = data.keys.join("\n");
+    textarea.style.borderColor = "var(--safe-green)";
+    localStorage.setItem("useEnvKey", "true");
+    // автоматически загружаем модели по первому ключу
+    await loadModels();
+  } else {
+    alert(t("alert_no_env_key"));
+  }
+});
+
 document.getElementById("runBtn").addEventListener("click", async () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.close();
@@ -316,12 +310,10 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   statusIndicator.className =
     "inline-block w-2 h-2 rounded-full bg-error-warn animate-pulse mr-3";
 
-  let apiKey = document.getElementById("apiKey").value.trim();
-  const useEnv = localStorage.getItem("useEnvKey") === "true";
-  if (!apiKey && useEnv) {
-    apiKey = "";
-  } else if (!apiKey) {
-    addLogLine(t("fatal_no_api_key"), "error");
+  const apiKeysText = document.getElementById("apiKeys").value.trim();
+  let apiKeys = apiKeysText.split(/\r?\n/).filter(k => k.trim() !== "");
+  if (apiKeys.length === 0) {
+    addLogLine(t("fatal_no_api_keys"), "error");
     logStatus.textContent = "ERR_NO_AUTH";
     statusIndicator.className =
       "inline-block w-2 h-2 rounded-full bg-danger-red mr-3";
@@ -344,10 +336,10 @@ document.getElementById("runBtn").addEventListener("click", async () => {
   ws.onopen = () => {
     ws.send(
       JSON.stringify({
-        api_key: apiKey,
+        api_keys: apiKeys,
         model: model,
         max_workers: maxWorkers,
-        max_retries: 3,
+        max_retries: 10,
         force: force,
         folder: "./html_reports",
         cache_file: "parsed_messages.json",
@@ -403,12 +395,16 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("langSwitcher").value = currentLang;
   applyLanguage();
   if (localStorage.getItem("useEnvKey") === "true") {
-    const input = document.getElementById("apiKey");
-    input.value = "";
-    input.placeholder = "[ ENV_KEY_LINKED ]";
-    input.style.borderColor = "var(--safe-green)";
-    input.style.color = "var(--safe-green)";
-    loadModels();
+    // если ранее использовали ENV, подтянем ключи автоматически
+    fetch("/api/env_keys")
+      .then(res => res.json())
+      .then(data => {
+        if (data.keys && data.keys.length) {
+          document.getElementById("apiKeys").value = data.keys.join("\n");
+          document.getElementById("apiKeys").style.borderColor = "var(--safe-green)";
+          loadModels();
+        }
+      });
   }
   loadFiles();
   loadCache();
