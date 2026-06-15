@@ -229,7 +229,14 @@ def load_progress():
         try:
             with open(PROGRESS_FILE, "r") as f:
                 prog = json.load(f)
-                return prog.get("last_index", 0), prog.get("processed_ids", set())
+                last_index = prog.get("last_index", 0)
+                processed = prog.get("processed_ids", [])
+                # Гарантируем, что processed – это set
+                if isinstance(processed, list):
+                    processed = set(processed)
+                elif not isinstance(processed, set):
+                    processed = set()
+                return last_index, processed
         except:
             return 0, set()
     return 0, set()
@@ -237,7 +244,6 @@ def load_progress():
 def save_progress(last_index, processed_ids):
     with open(PROGRESS_FILE, "w") as f:
         json.dump({"last_index": last_index, "processed_ids": list(processed_ids)}, f)
-
 # Глобальная блокировка для записи в CSV
 csv_lock = threading.Lock()
 csv_writer = None
